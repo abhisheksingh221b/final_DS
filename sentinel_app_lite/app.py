@@ -251,22 +251,3 @@ with tab5:
                 st.error("The LLM call failed: " + type(error).__name__ + ": " + str(error)[:150])
 
 # ================================================================ TAB 6: how it works
-with tab6:
-    st.header("How SENTINEL works")
-    st.markdown("""
-1. **Data:** ACLED weekly conflict counts per region for 7 conflicts (a fixed snapshot).
-2. **Severity (regression):** a model estimates how severe a region-month is from its mix of events. A decision tree and a random forest were compared.
-3. **Risk groups (clustering):** regions that behave alike are grouped. K-means is used, with the number of groups chosen by a score.
-4. **Forecast (time series):** next month's event count. A 3-month moving average is checked with a backtest.
-5. **Statistical checks:** tests show whether a trend is real or just noise.
-6. **LLM:** reads pasted text and can write the plain-English explanation (a fixed template is used if there is no key). It never makes the forecast.
-""")
-    st.subheader("Limits")
-    st.markdown("""
-- The data is weekly counts per region, not individual events, so there are no event descriptions or actors.
-- It is a fixed snapshot, not live data.
-- It shows patterns, not causes, and does not predict specific attacks.
-- The LLM can misread text and cannot check whether a report is true.
-- Decision support only. People make the decisions.
-""")
-    st.caption("Best severity model: " + summary["best_severity_model"] + " | Forecast method: " + summary["best_forecast_method"])
