@@ -1,118 +1,106 @@
-"""
-make_results.py  -  STEP 1: do all the heavy work once and save the answers as small CSV files.
-Run it with:   python make_results.py
-The Streamlit app (app.py) then only READS these files, so it opens instantly.
-This is the same analysis as the research notebook (lite version), written as one script.
-"""
+import warnings
+import numpy as np
+import pandas as pd
+from scipy import stats
+from sklearn.dummy import DummyRegressor
+from sklearn.tree import DecisionTreeRegressor
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import r2_score, mean_absolute_error, silhouette_score
 
-import warnings                                           # lets us hide harmless warnings
-import numpy as np                                        # maths on numbers
-import pandas as pd                                       # tables
-from scipy import stats                                   # statistical tests
-from sklearn.dummy import DummyRegressor                  # lazy baseline model
-from sklearn.tree import DecisionTreeRegressor            # one decision tree
-from sklearn.ensemble import RandomForestRegressor        # many trees voting
-from sklearn.cluster import KMeans                        # grouping method
-from sklearn.preprocessing import StandardScaler          # puts numbers on one scale
-from sklearn.metrics import r2_score, mean_absolute_error, silhouette_score   # scoring tools
+warnings.filterwarnings("ignore")
 
-warnings.filterwarnings("ignore")                         # hide harmless warnings
-
-# ---------------------------------------------------------------- settings
-DATA_FILE = "data/acled_weekly_aggregated.csv"            # the ACLED file (already in the data folder)
-COUNTRIES = ["Ukraine", "Palestine", "Sudan", "Myanmar", "Syria", "Democratic Republic of Congo", "Yemen"]   # our 7 conflicts
+DATA_FILE = "data/acled_weekly_aggregated.csv"
+COUNTRIES = ["Ukraine", "Palestine", "Sudan", "Myanmar", "Syria", "Democratic Republic of Congo", "Yemen"]
 TYPE_COLS = {"Battles": "battles", "Explosions/Remote violence": "explosions", "Violence against civilians": "civilians",
-             "Protests": "protests", "Riots": "riots", "Strategic developments": "strategic"}   # long names -> short names
-COUNT_COLS = ["battles", "explosions", "civilians", "protests", "riots", "strategic"]           # the 6 short names
+             "Protests": "protests", "Riots": "riots", "Strategic developments": "strategic"}
+COUNT_COLS = ["battles", "explosions", "civilians", "protests", "riots", "strategic"]
 
-# ---------------------------------------------------------------- 1. load and clean
-print("1. Loading and cleaning the data")                 # progress message
-weekly = pd.read_csv(DATA_FILE)                           # read the file
-weekly = weekly[weekly["country"].isin(COUNTRIES)]        # keep our 7 countries
-weekly["week"] = pd.to_datetime(weekly["week"])           # text dates -> real dates
-exposure_text = weekly["population_exposure"].astype(str) # treat exposure as text first
-exposure_text = exposure_text.str.replace(",", "")        # remove commas
-weekly["population_exposure"] = exposure_text.astype(float)   # back to numbers
-weekly["month"] = weekly["week"].dt.to_period("M").dt.to_timestamp()   # which month each week belongs to
-weekly = weekly[weekly["week"] >= "2020-01-01"]           # drop one stray week from 2019
-newest_month = weekly["month"].max()                      # the newest month in the file
-weekly = weekly[weekly["month"] < newest_month]           # drop it: it is unfinished
-last_month = weekly["month"].max()                        # the last complete month
+print("1. Loading and cleaning the data")
+weekly = pd.read_csv(DATA_FILE)
+weekly = weekly[weekly["country"].isin(COUNTRIES)]
+weekly["week"] = pd.to_datetime(weekly["week"])
+exposure_text = weekly["population_exposure"].astype(str)
+exposure_text = exposure_text.str.replace(",", "")
+weekly["population_exposure"] = exposure_text.astype(float)
+weekly["month"] = weekly["week"].dt.to_period("M").dt.to_timestamp()
+weekly = weekly[weekly["week"] >= "2020-01-01"]
+newest_month = weekly["month"].max()
+weekly = weekly[weekly["month"] < newest_month]
+last_month = weekly["month"].max()
 
-# ---------------------------------------------------------------- 2. monthly table
-print("2. Building the monthly table")                    # progress message
-weekly["type_col"] = weekly["event_type"].map(TYPE_COLS)  # short event-type names
+print("2. Building the monthly table")
+weekly["type_col"] = weekly["event_type"].map(TYPE_COLS)
 counts = weekly.pivot_table(index=["country", "admin1", "month"], columns="type_col", values="events",
-                            aggfunc="sum", fill_value=0)  # events per region per month per type
-for col in COUNT_COLS:                                    # make sure all 6 columns exist
+                            aggfunc="sum", fill_value=0)
+for col in COUNT_COLS:
     if col not in counts.columns:
         counts[col] = 0
-counts = counts[COUNT_COLS]                               # fixed column order
-group = weekly.groupby(["country", "admin1", "month"])    # group by region and month
-extra = pd.DataFrame()                                    # empty table to fill
-extra["fatalities"] = group["fatalities"].sum()           # deaths
-extra["exposure"] = group["population_exposure"].sum()    # people exposed
-extra["n_subtypes"] = group["sub_event_type"].nunique()   # variety of events
-monthly = counts.join(extra).reset_index()                # glue together
+counts = counts[COUNT_COLS]
+group = weekly.groupby(["country", "admin1", "month"])
+extra = pd.DataFrame()
+extra["fatalities"] = group["fatalities"].sum()
+extra["exposure"] = group["population_exposure"].sum()
+extra["n_subtypes"] = group["sub_event_type"].nunique()
+monthly = counts.join(extra).reset_index()
 
-all_months = pd.date_range(weekly["month"].min(), weekly["month"].max(), freq="MS")   # every month
-pairs = monthly[["country", "admin1"]].drop_duplicates()  # list of regions
-grid = pairs.merge(pd.DataFrame({"month": all_months}), how="cross")   # every region x every month
-monthly = grid.merge(monthly, on=["country", "admin1", "month"], how="left")   # add real numbers
-monthly = monthly.fillna(0)                               # months with no data -> 0
-monthly["total_events"] = monthly[COUNT_COLS].sum(axis=1) # all events
-monthly["civilian_share"] = 0.0                           # start at 0
-monthly["unrest_share"] = 0.0                             # start at 0
-has_events = monthly["total_events"] > 0                  # months with events
-monthly.loc[has_events, "civilian_share"] = monthly["civilians"] / monthly["total_events"]   # civilian share
-monthly.loc[has_events, "unrest_share"] = (monthly["protests"] + monthly["riots"]) / monthly["total_events"]   # protest/riot share
-monthly = monthly.sort_values(["country", "admin1", "month"]).reset_index(drop=True)   # sort
+all_months = pd.date_range(weekly["month"].min(), weekly["month"].max(), freq="MS")
+pairs = monthly[["country", "admin1"]].drop_duplicates()
+grid = pairs.merge(pd.DataFrame({"month": all_months}), how="cross")
+monthly = grid.merge(monthly, on=["country", "admin1", "month"], how="left")
+monthly = monthly.fillna(0)
+monthly["total_events"] = monthly[COUNT_COLS].sum(axis=1)
+monthly["civilian_share"] = 0.0
+monthly["unrest_share"] = 0.0
+has_events = monthly["total_events"] > 0
+monthly.loc[has_events, "civilian_share"] = monthly["civilians"] / monthly["total_events"]
+monthly.loc[has_events, "unrest_share"] = (monthly["protests"] + monthly["riots"]) / monthly["total_events"]
+monthly = monthly.sort_values(["country", "admin1", "month"]).reset_index(drop=True)
 
-monthly_small = monthly[["country", "admin1", "month", "total_events", "fatalities"] + COUNT_COLS]   # columns the app needs for charts
-monthly_small.to_csv("data/monthly_region.csv", index=False)   # save for the app
+monthly_small = monthly[["country", "admin1", "month", "total_events", "fatalities"] + COUNT_COLS]
+monthly_small.to_csv("data/monthly_region.csv", index=False)
 
-# ---------------------------------------------------------------- 3. severity models
-print("3. Severity: comparing models")                    # progress message
-SPLIT_DATE = pd.Timestamp("2025-06-01")                   # train before, test after
-FEATURES = COUNT_COLS + ["civilian_share", "n_subtypes", "log_exposure"]   # model inputs
-active = monthly[monthly["total_events"] > 0].copy()      # months with events
-active["log_exposure"] = np.log1p(active["exposure"])     # log of exposure
-active["target"] = np.log1p(active["fatalities"])         # log(deaths + 1)
-train = active[active["month"] <= SPLIT_DATE]             # training months
-test = active[active["month"] > SPLIT_DATE]               # test months
+print("3. Severity: comparing models")
+SPLIT_DATE = pd.Timestamp("2025-06-01")
+FEATURES = COUNT_COLS + ["civilian_share", "n_subtypes", "log_exposure"]
+active = monthly[monthly["total_events"] > 0].copy()
+active["log_exposure"] = np.log1p(active["exposure"])
+active["target"] = np.log1p(active["fatalities"])
+train = active[active["month"] <= SPLIT_DATE]
+test = active[active["month"] > SPLIT_DATE]
 
 models = {"Baseline (always the average)": DummyRegressor(),
           "Decision Tree": DecisionTreeRegressor(max_depth=8, min_samples_leaf=5, random_state=42),
           "Random Forest": RandomForestRegressor(n_estimators=200, max_depth=12, min_samples_leaf=5, random_state=42)}
-names_list = []                                           # model names
-r2_list = []                                              # R2 scores
-error_list = []                                           # average errors
-for name in models:                                       # each model in turn
-    model = models[name]                                  # pick it
-    model.fit(train[FEATURES], train["target"])           # learn
-    guess = model.predict(test[FEATURES])                 # estimate test months
+names_list = []
+r2_list = []
+error_list = []
+for name in models:
+    model = models[name]
+    model.fit(train[FEATURES], train["target"])
+    guess = model.predict(test[FEATURES])
     names_list.append(name)
     r2_list.append(round(r2_score(test["target"], guess), 3))
     error_list.append(round(mean_absolute_error(test["target"], guess), 3))
 severity_table = pd.DataFrame({"model": names_list, "R2": r2_list, "average_error": error_list})
-severity_table.to_csv("data/severity_models.csv", index=False)   # save
+severity_table.to_csv("data/severity_models.csv", index=False)
 
-best_name = severity_table.set_index("model")["R2"].idxmax()     # best model
-final_model = models[best_name]                           # use it
-final_model.fit(active[FEATURES], active["target"])       # retrain on all months
-reference = np.sort(final_model.predict(active[FEATURES]))   # sorted estimates for the 0-100 score
+best_name = severity_table.set_index("model")["R2"].idxmax()
+final_model = models[best_name]
+final_model.fit(active[FEATURES], active["target"])
+reference = np.sort(final_model.predict(active[FEATURES]))
 importance = pd.DataFrame({"feature": FEATURES, "importance": models["Random Forest"].feature_importances_})
-importance.to_csv("data/feature_importance.csv", index=False)    # save
+importance.to_csv("data/feature_importance.csv", index=False)
 print("   best model:", best_name)
 
-# ---------------------------------------------------------------- 4. risk groups
-print("4. Risk groups: K-means")   # progress message
-start_of_window = last_month - pd.DateOffset(months=11)   # first of the last 12 months
-recent = monthly[monthly["month"] >= start_of_window]     # last 12 months
-sum_columns = COUNT_COLS + ["fatalities", "total_events"] # columns to add up
-sums = recent.groupby(["country", "admin1"])[sum_columns].sum()   # per region
-sums = sums[sums["total_events"] > 0]                     # drop silent regions
-feat = pd.DataFrame(index=sums.index)                     # one row per region
+print("4. Risk groups: K-means")
+start_of_window = last_month - pd.DateOffset(months=11)
+recent = monthly[monthly["month"] >= start_of_window]
+sum_columns = COUNT_COLS + ["fatalities", "total_events"]
+sums = recent.groupby(["country", "admin1"])[sum_columns].sum()
+sums = sums[sums["total_events"] > 0]
+feat = pd.DataFrame(index=sums.index)
 feat["avg_events"] = sums["total_events"] / 12
 feat["deaths_per_event"] = sums["fatalities"] / sums["total_events"]
 feat["civilian_share"] = sums["civilians"] / sums["total_events"]
@@ -121,93 +109,92 @@ feat["avg_deaths"] = sums["fatalities"] / 12
 X = feat[["avg_events", "deaths_per_event", "civilian_share", "unrest_share"]].copy()
 X["avg_events"] = np.log1p(X["avg_events"])
 X["deaths_per_event"] = np.log1p(X["deaths_per_event"])
-X_scaled = StandardScaler().fit_transform(X)              # same scale for all
+X_scaled = StandardScaler().fit_transform(X)
 
-k_list = []                                               # number of groups tried
-silhouette_list = []                                      # how well separated each choice is
-for k in range(2, 6):                                     # try 2, 3, 4 and 5 groups
+k_list = []
+silhouette_list = []
+for k in range(2, 6):
     labels = KMeans(n_clusters=k, n_init=10, random_state=42).fit_predict(X_scaled)
     k_list.append(k)
     silhouette_list.append(round(silhouette_score(X_scaled, labels), 3))
-pd.DataFrame({"number_of_groups": k_list, "silhouette": silhouette_list}).to_csv("data/cluster_silhouette.csv", index=False)   # save
+pd.DataFrame({"number_of_groups": k_list, "silhouette": silhouette_list}).to_csv("data/cluster_silhouette.csv", index=False)
 
-kmeans_labels = KMeans(n_clusters=3, n_init=10, random_state=42).fit_predict(X_scaled)   # we use 3 groups
-feat["cluster"] = kmeans_labels                           # use K-means groups
-avg_deaths_by_cluster = feat.groupby("cluster")["avg_deaths"].mean()   # deaths per group
-order = list(avg_deaths_by_cluster.sort_values().index)   # fewest to most
-names = {}                                                # group number -> name
+kmeans_labels = KMeans(n_clusters=3, n_init=10, random_state=42).fit_predict(X_scaled)
+feat["cluster"] = kmeans_labels
+avg_deaths_by_cluster = feat.groupby("cluster")["avg_deaths"].mean()
+order = list(avg_deaths_by_cluster.sort_values().index)
+names = {}
 names[order[0]] = "Low activity"
 names[order[1]] = "Moderate"
 names[order[2]] = "High intensity"
-feat["risk_group"] = feat["cluster"].map(names)           # name for each region
+feat["risk_group"] = feat["cluster"].map(names)
 profile_columns = ["avg_events", "deaths_per_event", "civilian_share", "unrest_share"]
-profile = feat.groupby("risk_group")[profile_columns].mean().round(2)   # group profiles
-profile["regions"] = feat["risk_group"].value_counts()    # group sizes
-profile.reset_index().to_csv("data/cluster_profile.csv", index=False)   # save
+profile = feat.groupby("risk_group")[profile_columns].mean().round(2)
+profile["regions"] = feat["risk_group"].value_counts()
+profile.reset_index().to_csv("data/cluster_profile.csv", index=False)
 
-# ---------------------------------------------------------------- 5. forecast methods
-print("5. Forecast: SMA against a simple yardstick")     # progress message
+print("5. Forecast: SMA against a simple yardstick")
 
-def forecast_naive(values):                               # yardstick: next month = last month
+def forecast_naive(values):
     return float(values[-1])
 
-def forecast_sma(values):                                 # our forecast: simple moving average
-    return float(np.mean(values[-3:]))                    # average of the last 3 months
+def forecast_sma(values):
+    return float(np.mean(values[-3:]))
 
 METHODS = {"Same as last month (yardstick)": forecast_naive, "SMA (average of last 3 months)": forecast_sma}
 
-country_month = monthly.groupby(["country", "month"])[["total_events", "fatalities"]].sum().reset_index()   # per country per month
+country_month = monthly.groupby(["country", "month"])[["total_events", "fatalities"]].sum().reset_index()
 
-def get_series(country):                                  # monthly event counts of one country
+def get_series(country):
     rows = country_month[country_month["country"] == country].sort_values("month")
     return rows["total_events"].values
 
-error_total = {}                                          # total mistakes
-actual_total = {}                                         # total real events
+error_total = {}
+actual_total = {}
 for method_name in METHODS:
     error_total[method_name] = 0.0
     actual_total[method_name] = 0.0
-for country in COUNTRIES:                                 # each country
+for country in COUNTRIES:
     series = get_series(country)
-    for method_name in METHODS:                           # each method
-        for i in range(6, 0, -1):                         # last 6 months one by one
-            guess = METHODS[method_name](series[:-i])     # forecast using only earlier months
-            truth = series[-i]                            # what really happened
+    for method_name in METHODS:
+        for i in range(6, 0, -1):
+            guess = METHODS[method_name](series[:-i])
+            truth = series[-i]
             error_total[method_name] = error_total[method_name] + abs(guess - truth)
             actual_total[method_name] = actual_total[method_name] + truth
-method_list = []                                          # method names
-error_percent = []                                        # error as % of events
+method_list = []
+error_percent = []
 for method_name in METHODS:
     method_list.append(method_name)
     error_percent.append(round(error_total[method_name] / actual_total[method_name] * 100, 1))
 backtest = pd.DataFrame({"method": method_list, "error_percent": error_percent})
-backtest.to_csv("data/forecast_backtest.csv", index=False)   # save
-best_method_name = "SMA"                                  # the forecast we use
+backtest.to_csv("data/forecast_backtest.csv", index=False)
+best_method_name = "SMA"
 print("   forecast used:", best_method_name)
 
-def forecast_row(values):                                 # forecast numbers for one series
-    guess = forecast_sma(values)                          # forecast with SMA
-    spread = np.std(values[-12:])                         # how much it jumps around
-    baseline = float(np.mean(values[-9:-3]))              # average of the 6 months before the latest 3
+def forecast_row(values):
+    guess = forecast_sma(values)
+    spread = np.std(values[-12:])
+    baseline = float(np.mean(values[-9:-3]))
     if baseline >= 3:
-        ratio = guess / baseline                          # forecast vs earlier level
+        ratio = guess / baseline
     else:
-        ratio = 1.0                                       # tiny numbers: stable
+        ratio = 1.0
     if ratio > 1.10:
         direction = "Rising"
     elif ratio < 0.90:
         direction = "Falling"
     else:
         direction = "Stable"
-    low = guess - 1.96 * spread                           # rough lower end
+    low = guess - 1.96 * spread
     if low < 0:
         low = 0
-    high = guess + 1.96 * spread                          # rough upper end
+    high = guess + 1.96 * spread
     return {"last_month": float(values[-1]), "earlier_avg": round(baseline, 1), "forecast": round(guess, 1),
             "low": round(low, 1), "high": round(high, 1), "direction": direction}
 
-def trend_test(values):                                   # is the 12-month trend real?
-    if values[-12:].std() > 0:                            # numbers must vary
+def trend_test(values):
+    if values[-12:].std() > 0:
         rho, p = stats.spearmanr(np.arange(12), values[-12:])
     else:
         rho, p = 0, 1
@@ -217,40 +204,39 @@ def trend_test(values):                                   # is the 12-month tren
         verdict = "No"
     return round(rho, 2), round(p, 3), verdict
 
-# ---------------------------------------------------------------- 6. statistical tests (per country)
-print("6. Statistical tests")                             # progress message
-test_rows = []                                            # one row per country
+print("6. Statistical tests")
+test_rows = []
 for country in COUNTRIES:
     series = get_series(country)
-    rho, trend_p, trend_real = trend_test(series)         # Spearman trend
-    before = series[-12:-6]                               # the 6 months before
-    recent6 = series[-6:]                                 # the latest 6 months
-    stat, mw_p = stats.mannwhitneyu(recent6, before, alternative="two-sided")   # Mann-Whitney
+    rho, trend_p, trend_real = trend_test(series)
+    before = series[-12:-6]
+    recent6 = series[-6:]
+    stat, mw_p = stats.mannwhitneyu(recent6, before, alternative="two-sided")
     test_rows.append({"country": country, "trend_rho": rho, "trend_p": trend_p,
                       "trend_is_real": trend_real, "avg_before": round(before.mean()), "avg_recent": round(recent6.mean()),
                       "level_change_p": round(mw_p, 3)})
 stat_tests = pd.DataFrame(test_rows)
-stat_tests.to_csv("data/stat_tests.csv", index=False)     # save
+stat_tests.to_csv("data/stat_tests.csv", index=False)
 
-country_month["deaths_per_event"] = 0.0                   # deaths per event (used in the Compare tab)
+country_month["deaths_per_event"] = 0.0
 busy = country_month["total_events"] > 0
 country_month.loc[busy, "deaths_per_event"] = country_month["fatalities"] / country_month["total_events"]
 
-print("7. Putting it together (this can take a minute)")  # progress message
-three_back = last_month - pd.DateOffset(months=2)         # first of the last 3 months
-last3 = monthly[monthly["month"] >= three_back].copy()    # last 3 months
+print("7. Putting it together (this can take a minute)")
+three_back = last_month - pd.DateOffset(months=2)
+last3 = monthly[monthly["month"] >= three_back].copy()
 last3["log_exposure"] = np.log1p(last3["exposure"])
 last3["estimate"] = final_model.predict(last3[FEATURES])
-last3.loc[last3["total_events"] == 0, "estimate"] = 0     # no events = lowest
-avg_estimate = last3.groupby(["country", "admin1"])["estimate"].mean()   # average of 3 months
+last3.loc[last3["total_events"] == 0, "estimate"] = 0
+avg_estimate = last3.groupby(["country", "admin1"])["estimate"].mean()
 
 rows = []
-for (country, region), g in monthly.groupby(["country", "admin1"]):   # every region
+for (country, region), g in monthly.groupby(["country", "admin1"]):
     values = g.sort_values("month")["total_events"].values
-    estimate = avg_estimate[(country, region)]            # its average estimate
-    below = np.sum(reference < estimate)                  # how many past values are lower
-    severity = round(below / len(reference) * 100)        # 0-100 score
-    if values[-12:].sum() == 0:                           # silent for a year
+    estimate = avg_estimate[(country, region)]
+    below = np.sum(reference < estimate)
+    severity = round(below / len(reference) * 100)
+    if values[-12:].sum() == 0:
         fc = {"last_month": 0.0, "earlier_avg": 0.0, "forecast": 0.0, "low": 0.0, "high": 0.0, "direction": "Stable"}
     else:
         fc = forecast_row(values)
@@ -260,12 +246,12 @@ for (country, region), g in monthly.groupby(["country", "admin1"]):   # every re
     else:
         risk_group = "Inactive"
     row = {"country": country, "admin1": region, "risk_group": risk_group, "severity": severity}
-    row.update(fc)                                        # add the forecast numbers
+    row.update(fc)
     row["trend_p"] = trend_p
     row["trend_is_real"] = trend_real
     rows.append(row)
 results = pd.DataFrame(rows)
-results.to_csv("data/region_results.csv", index=False)    # save
+results.to_csv("data/region_results.csv", index=False)
 
 country_rows = []
 for country in COUNTRIES:
@@ -277,19 +263,14 @@ for country in COUNTRIES:
     row["trend_is_real"] = trend_real
     country_rows.append(row)
 country_results = pd.DataFrame(country_rows)
-for_deaths = monthly[monthly["month"] >= start_of_window].groupby("country")[["fatalities", "total_events"]].sum()   # last 12 months
+for_deaths = monthly[monthly["month"] >= start_of_window].groupby("country")[["fatalities", "total_events"]].sum()
 country_results["deaths_per_event"] = country_results["country"].map(for_deaths["fatalities"] / for_deaths["total_events"]).round(2)
-high_share = []                                           # % of regions that are high intensity
-avg_sev = []                                              # average severity
+high_share = []
+avg_sev = []
 for country in COUNTRIES:
     region_rows = results[results["country"] == country]
     high_share.append(round((region_rows["risk_group"] == "High intensity").mean() * 100))
     avg_sev.append(round(region_rows["severity"].mean()))
 country_results["pct_regions_high_intensity"] = high_share
 country_results["avg_region_severity"] = avg_sev
-country_results.to_csv("data/country_results.csv", index=False)   # save
-
-summary = pd.DataFrame({"item": ["last_complete_month", "best_severity_model", "best_forecast_method"],
-                        "value": [last_month.strftime("%Y-%m-%d"), best_name, "SMA (3-month average)"]})
-summary.to_csv("data/summary.csv", index=False)           # save
-print("Done. Files saved in the data folder.")
+country_results.to_csv("data/country_results.csv", index=False)
